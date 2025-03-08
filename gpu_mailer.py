@@ -5,7 +5,7 @@ import time
 import subprocess
 from datetime import datetime
 
-from gpu_mailer_config import user, pswd, threshold_MB, duration_sec, interval_sce
+from gpu_mailer_config import user, pswd, threshold_MB, duration_sec, interval_sce, server, port, max_gpu_count
 
 
 def compare_dicts(dict1, dict2):
@@ -23,16 +23,20 @@ def compare_dicts(dict1, dict2):
         if key not in dict1:
             differences[key] = f"Add {dict2[key]}"
 
+    diff_strs = []
     if differences:
         print(fr'【{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}】')
         for key, change in differences.items():
-            print(f"GPU {key} : {change}")
+            diff_str = f"GPU {key} : {change}"
+            diff_strs.append(diff_str)
+            print(diff_str)
         print()
+    return diff_strs
 
 def email_send(recv, head, content):
     # 邮件配置信息
-    smtp_server = 'smtp.qq.com'  # 邮箱服务器
-    smtp_port = 465  # 邮箱端口
+    smtp_server = server  # 邮箱服务器
+    smtp_port = port  # 邮箱端口
     smtp_ssl = True  # 启用ssl
     smtp_user = user
     smtp_password = pswd  # 邮箱授权码，到邮箱网站中查看
@@ -54,7 +58,7 @@ def email_send(recv, head, content):
         smtp_obj = smtplib.SMTP_SSL(smtp_server, smtp_port)  # 连接服务器
         smtp_obj.login(smtp_user, smtp_password)  # 登入发送者邮箱
         smtp_obj.sendmail(sender, receivers, message.as_string())  # 发送邮件指令
-        print("邮件发送成功")
+        print(f"邮件发送成功: {sender} -> {receivers}")
  
     except smtplib.SMTPException as e:
         print("Error: 邮件发送失败: ", e)
@@ -106,12 +110,12 @@ def get_gpu_processes():
 
 
 def monitor_gpu_memory(threshold_MB=100, duration_sec=1):
-    low_memory_gpus = {}  # 用于跟踪每个GPU的低显存状态和持续时间
-    func_used = [True] * 8 # 初始状态不发邮件
+    low_memory_gpus = {}
+    func_used = [True] * max_gpu_count
     last_gpu_info = {}
+    message = ""
     while True:
         gpu_processes = get_gpu_processes()  # 获取GPU上运行的进程
-        message = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
         need_func = False
 
         for gpu_id, info in gpu_processes.items():
@@ -133,7 +137,7 @@ def monitor_gpu_memory(threshold_MB=100, duration_sec=1):
                 if gpu_id in low_memory_gpus:
                     del low_memory_gpus[gpu_id]  # 重置状态
                     func_used[gpu_id] = False
-        compare_dicts(last_gpu_info, gpu_processes)
+        diff = compare_dicts(last_gpu_info, gpu_processes)
         last_gpu_info = gpu_processes
 
         # 有我的进程，就不发邮件（在线状态）
@@ -141,11 +145,14 @@ def monitor_gpu_memory(threshold_MB=100, duration_sec=1):
             for gpu_id, info in gpu_processes.items():
                 for process in processes:
                     if process['user'] == "ljn": need_func = False
-        if need_func:
-            func(message)
-            low_memory_gpus.clear()  # 清空状态，防止重复调用func
 
-        time.sleep(interval_sce)  # 每秒监控一次
+        if need_func:
+            date = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
+            message = date+'\n'+'\n'.join(diff)+'\n'+message
+            func(message)
+            low_memory_gpus.clear()
+
+        time.sleep(interval_sce)
 
 if __name__ == "__main__":
     monitor_gpu_memory(threshold_MB, duration_sec)
