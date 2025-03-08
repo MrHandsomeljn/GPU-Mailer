@@ -26,8 +26,9 @@
 <img src="img/demo2.jpg" style="width:50%"></img>
 
 ## get start
-- `git clone git@github.com:MrHandsomeljn/GPU-Mailer.git`
-- `cd gpu_mailer && vim gpu_mailer_config.py` # 新建一个文件，放配置
+1. `git clone git@github.com:MrHandsomeljn/GPU-Mailer.git`
+2. `cd gpu_mailer`
+3. `vim gpu_mailer_config.py` # 新建一个文件，放配置
     ```python
     user = "123@qq.com"    # 邮箱地址
     pswd = "xxx"           # 要用SMTP的授权码，不是用户登录密码
@@ -39,5 +40,5 @@
     interval_sce = 5       # 循环间隔时间
     max_gpu_count = 8      # GPU数量
     ```
-- 开一个tmux或者守护进程
-- `python gpu_mailer`
+4. 开一个tmux或者守护进程（保证终端下线后还能提醒）
+5. `python gpu_mailer.py`
