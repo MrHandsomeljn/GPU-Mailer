@@ -1,14 +1,19 @@
-import smtplib  # 邮件发送模块
-from email.mime.text import MIMEText
-from email.header import Header
 import time
+import gpustat
+import smtplib
 import subprocess
 from datetime import datetime
+from email.header import Header
+from email.mime.text import MIMEText
+from gpu_mailer_config import user, pswd, threshold_MB, duration_sec, interval_sce, server, port, server_user_name
 
-from gpu_mailer_config import user, pswd, threshold_MB, duration_sec, interval_sce, server, port, max_gpu_count
+def get_gpu_count():
+    gpus = gpustat.GPUStatCollection.new_query()
+    return len(gpus)
 
+gpu_count = get_gpu_count()
 
-def compare_dicts(dict1, dict2):
+def dicts_different_to_str(dict1, dict2):
     differences = {}
 
     # 检查dict1中的键
@@ -63,22 +68,20 @@ def email_send(recv, head, content):
     except smtplib.SMTPException as e:
         print("Error: 邮件发送失败: ", e)
 
-def func(message):
-    email_send(user, "【GPU空置】", message)
+def func(title, message):
+    email_send(user, title, message)
 
 def get_gpu_processes():
     """获取每个GPU上运行的进程信息"""
     gpu_processes = {}
     try:
-        # 调用gpustat命令获取GPU进程信息
-        output = subprocess.check_output(['gpustat', '--no-color', '-c', '-u', '-p', '-F'], stderr=subprocess.STDOUT)
-        output_lines = output.decode('utf-8').strip().split('\n')
-
-        for line in output_lines[1:]:  # 跳过第一行
-            parts = line.split('|')
-            gpu_id = int(parts[0][1])  # GPU ID
-            memory_used = int(parts[2].split('/')[0])  # 当前显存使用
-            processes = parts[3].strip().split() if len(parts) > 1 else []
+        # 使用gpustat库获取GPU进程信息
+        gpus = gpustat.GPUStatCollection.new_query()
+        
+        for gpu in gpus:
+            gpu_id = gpu.index  # GPU ID
+            memory_used = gpu.memory_used  # 当前显存使用
+            processes = gpu.processes  # 当前GPU上运行的进程信息
 
             if gpu_id not in gpu_processes:
                 gpu_processes[gpu_id] = {
@@ -87,14 +90,9 @@ def get_gpu_processes():
                 }
 
             for process in processes:
-                process = process.strip()
-                process = process.split(":")
-                user = process[0]
-                process = process[1].split("/")
-                pname = process[0]
-                process = process[1].split("(")
-                pid = process[0]
-                mem = process[1][:-2]
+                user = process['username']
+                pid = process['pid']
+                mem = process['gpu_memory_usage']  # 使用gpustat提供的内存信息
                 if user == "gdm": continue
                 gpu_processes[gpu_id]['processes'].append({
                     'user': user,
@@ -102,55 +100,62 @@ def get_gpu_processes():
                     'memory_used_MB': mem
                 })
 
-    except subprocess.CalledProcessError as e:
-        print("获取GPU进程信息失败:", e.with_traceback())  # 输出错误信息
     except Exception as e:
         print("获取GPU进程信息失败:", e.with_traceback())
     return gpu_processes
 
 
+# state：空闲GPU的个数
+# state>0 发一封
+# state=0 发一封
+# 在线时不发
 def monitor_gpu_memory(threshold_MB=100, duration_sec=1):
-    low_memory_gpus = {}
-    func_used = [True] * max_gpu_count
+    last_state_count = 0 # 假设一开始没空GPU
+    gpu_free_time = {}
     last_gpu_info = {}
-    message = ""
+    gpu_free_for_duration = [False] * gpu_count # 假设一开始都是空GPU
     while True:
+        online = False
+        
         gpu_processes = get_gpu_processes()  # 获取GPU上运行的进程
-        need_func = False
 
         for gpu_id, info in gpu_processes.items():
-            memory_used = info['memory_used_MB']  # 当前GPU的显存占用
-            processes = info['processes']  # 当前GPU上运行的进程信息
-            message += f"GPU {gpu_id}: {memory_used} MB\n"
-            for process in processes:
-                message += f"  User: {process['user']}, PID: {process['pid']}, Memory Used: {process['memory_used_MB']} MB\n"
+            online = online or any([process['user']==server_user_name for process in info['processes']])
 
-            # 检查显存占用是否低于阈值
+            memory_used = info['memory_used_MB']
+
             if memory_used < threshold_MB:
-                if gpu_id not in low_memory_gpus:
-                    low_memory_gpus[gpu_id] = time.time()  # 记录时间
-                elif time.time() - low_memory_gpus[gpu_id] >= duration_sec:
-                    if func_used[gpu_id] == False:
-                        func_used[gpu_id] = True
-                        need_func = True  # 达到持续时间，标记需要调用func
+                now = time.time()
+                if gpu_id not in gpu_free_time:
+                    gpu_free_time[gpu_id] = now
+                    gpu_free_for_duration[gpu_id] = False
+                elif now - gpu_free_time[gpu_id] >= duration_sec:
+                    gpu_free_for_duration[gpu_id] = True
             else:
-                if gpu_id in low_memory_gpus:
-                    del low_memory_gpus[gpu_id]  # 重置状态
-                    func_used[gpu_id] = False
-        diff = compare_dicts(last_gpu_info, gpu_processes)
+                gpu_free_for_duration[gpu_id] = False
+                gpu_free_time.pop(gpu_id, None)
+        
+        diff = dicts_different_to_str(last_gpu_info, gpu_processes)
         last_gpu_info = gpu_processes
 
-        # 有我的进程，就不发邮件（在线状态）
-        if need_func:
-            for gpu_id, info in gpu_processes.items():
+        if not online:
+            title = ""
+            free_gpu = [str(index) for index, value in enumerate(gpu_free_for_duration) if value]
+            if last_state_count == 0 and free_gpu       : title = f"【GPU空闲】{','.join(free_gpu)}"
+            if last_state_count > 0  and free_gpu == [] : title = f"【GPU已满】"
+            
+            if title:
+                message1 = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
+                message2 = '\n'.join(diff)
+                message3 = ""
+                processes = info['processes']  # 当前GPU上运行的进程信息
+                message3 += f"GPU {gpu_id}: {memory_used} MB\n"
                 for process in processes:
-                    if process['user'] == "ljn": need_func = False
+                    message3 += f"  User: {process['user']}, PID: {process['pid']}, Memory Used: {process['memory_used_MB']} MB\n"
 
-        if need_func:
-            date = datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
-            message = date+'\n'+'\n'.join(diff)+'\n'+message
-            func(message)
-            low_memory_gpus.clear()
+                message = message1 + message2 + message3
+                func(title, message)
+                gpu_free_time.clear()
 
         time.sleep(interval_sce)
 
